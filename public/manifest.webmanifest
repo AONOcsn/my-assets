@@ -1,0 +1,10 @@
+{
+  "name": "净值 · 本地资产",
+  "short_name": "净值",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f6f7f4",
+  "theme_color": "#f6f7f4",
+  "description": "离线优先的本地资产管理工具",
+  "icons": [{ "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
