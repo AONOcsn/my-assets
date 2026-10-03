@@ -1,5 +1,5 @@
 // 版本号变更会触发新 SW 安装、清理旧缓存并接管页面
-const CACHE = 'jingzi-v3'
+const CACHE = 'jingzi-v4'
 const CORE = ['./', './index.html', './assets/app.js', './assets/app.css', './manifest.webmanifest', './icon.svg']
 
 self.addEventListener('install', event => event.waitUntil(
