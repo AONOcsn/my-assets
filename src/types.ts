@@ -14,7 +14,7 @@ export interface Transaction {
   amount: number; targetAmount?: number; categoryId?: string; date: string; note?: string; createdAt: string
 }
 export interface Rate { currency: string; usdValue: number; updatedAt: string }
-export interface Settings { baseCurrency: string; lastRateUpdate?: string }
+export interface Settings { baseCurrency: string; lastRateUpdate?: string; lastRateSource?: string }
 export interface AppData { version: 1; accounts: Account[]; categories: Category[]; transactions: Transaction[]; rates: Record<string, Rate>; settings: Settings }
 
 export const accountTypes: Record<AccountType, { label: string; icon: string }> = {
