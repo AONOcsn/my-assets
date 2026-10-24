@@ -27,6 +27,7 @@ test('currencies missing from this round keep their previous value', () => {
   // 加密货币源整体失败：只回填了法币
   const next = makeRates(previous, { fiat: { CNY: 7.2 }, crypto: {} }, 'T')
   assert.equal(next.rates.BTC.usdValue, 60000, 'BTC 应保留旧值而不是被清空')
+  assert.equal(next.rates.BTC.updatedAt, 'old', '未更新币种不能伪装成最新行情')
   assert.equal(next.rates.CNY.usdValue, 1 / 7.2, 'CNY 应更新为新值')
 })
 

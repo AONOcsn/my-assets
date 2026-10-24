@@ -128,7 +128,7 @@ export async function fetchLiveRates(): Promise<LiveRates> {
 }
 
 /** 纯函数：把上游行情折算成账本使用的「1 单位币值多少 USD」。便于单元测试。 */
-export function makeRates(current: AppData, live: LiveRates, now = new Date().toISOString()): AppData {
+export function makeRates<T extends Pick<AppData, 'rates' | 'settings'>>(current: T, live: LiveRates, now = new Date().toISOString()): T {
   const { fiat, crypto } = live
   const rates: Record<string, Rate> = {}
   for (const [code] of supportedCurrencies) {
@@ -137,10 +137,10 @@ export function makeRates(current: AppData, live: LiveRates, now = new Date().to
     else if (crypto[code] !== undefined) usdValue = crypto[code]
     else if (fiat[code]) usdValue = 1 / fiat[code]
     // 本轮未取到的币种保留上一次的值，避免部分源失败时把已有汇率清空
-    else usdValue = current.rates[code]?.usdValue
+    else usdValue = undefined
     if (typeof usdValue === 'number' && Number.isFinite(usdValue) && usdValue > 0) {
       rates[code] = { currency: code, usdValue, updatedAt: now }
-    }
+    } else if (current.rates[code]) rates[code] = current.rates[code]
   }
   const source = [
     live.fiat.CNY ? '法币' : '',

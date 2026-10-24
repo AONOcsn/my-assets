@@ -1,4 +1,4 @@
-import type { AppData, Category } from './types'
+import type { AppData, Category } from './types.ts'
 
 const categories: Category[] = [
   ['工资', 'income', '#2f6b5b', '↑'], ['奖金', 'income', '#4e7ca8', '✦'], ['投资收益', 'income', '#b79742', '↗'], ['其他收入', 'income', '#7d8752', '+'],
@@ -6,8 +6,8 @@ const categories: Category[] = [
 ].map(([name, direction, color, icon], index) => ({ id: `seed-${index}`, name, direction: direction as Category['direction'], color, icon, sortOrder: index, active: true }))
 
 export const emptyData = (): AppData => ({
-  version: 1,
-  accounts: [], categories, transactions: [],
+  version: 2,
+  accounts: [], categories: structuredClone(categories), transactions: [], snapshots: [],
   rates: { USD: { currency: 'USD', usdValue: 1, updatedAt: new Date().toISOString() } },
-  settings: { baseCurrency: 'CNY' }
+  settings: { baseCurrency: 'CNY', hideAmounts: false }
 })

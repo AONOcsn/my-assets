@@ -6,7 +6,7 @@ export type CategoryDirection = 'income' | 'expense'
 export interface Account {
   id: string; name: string; kind: AccountKind; type: AccountType; currency: string
   openingBalance: number; color: string; icon: string; note?: string; sortOrder: number
-  archived?: boolean; createdAt: string
+  archived?: boolean; createdAt: string; lastInventoriedAt?: string
 }
 export interface Category { id: string; name: string; direction: CategoryDirection; color: string; icon: string; sortOrder: number; active: boolean }
 export interface Transaction {
@@ -14,8 +14,17 @@ export interface Transaction {
   amount: number; targetAmount?: number; categoryId?: string; date: string; note?: string; createdAt: string
 }
 export interface Rate { currency: string; usdValue: number; updatedAt: string }
-export interface Settings { baseCurrency: string; lastRateUpdate?: string; lastRateSource?: string }
-export interface AppData { version: 1; accounts: Account[]; categories: Category[]; transactions: Transaction[]; rates: Record<string, Rate>; settings: Settings }
+export interface Settings { baseCurrency: string; lastRateUpdate?: string; lastRateSource?: string; hideAmounts?: boolean }
+export type SnapshotSource = 'baseline' | 'inventory' | 'account' | 'transaction' | 'archive' | 'rates'
+export interface SnapshotAccount {
+  id: string; name: string; kind: AccountKind; type: AccountType; currency: string; balance: number; archived?: boolean
+}
+export interface AssetSnapshot {
+  id: string; createdAt: string; date: string; source: SnapshotSource
+  accounts: SnapshotAccount[]; rates: Record<string, Rate>; checkedAccountIds: string[]
+}
+export interface AppData { version: 2; accounts: Account[]; categories: Category[]; transactions: Transaction[]; rates: Record<string, Rate>; settings: Settings; snapshots: AssetSnapshot[] }
+export type LedgerData = Pick<AppData, 'accounts' | 'transactions' | 'rates' | 'settings'>
 
 export const accountTypes: Record<AccountType, { label: string; icon: string }> = {
   cash: { label: '现金', icon: '◉' }, bank: { label: '银行卡', icon: '▤' }, 'foreign-bank': { label: '海外银行卡', icon: '◎' },

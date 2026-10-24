@@ -1,137 +1,123 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { emptyData } from './data'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { loadData, saveData } from './db'
-import { allocationByType, balanceOf, rateFor, removeAccount, totalFor } from './ledger'
+import { parseBackup } from './backup'
+import { createWriteQueue } from './store'
+import { captureSnapshot, deleteEmptyAccount, hasAccountHistory, inventoryBalances, localDate, setArchived } from './inventory'
 import { fetchLiveRates, makeRates } from './rates'
-import { accountTypes, colors, supportedCurrencies, uid, type Account, type AccountKind, type AccountType, type AppData, type Category, type EntryType, type Rate, type Transaction } from './types'
+import { AccountDetail, Accounts } from './Accounts'
+import { Overview } from './Overview'
+import { Bills } from './Bills'
+import { Categories, Settings } from './Settings'
+import { AccountForm, EntryForm, InventoryForm } from './forms'
+import { Icon, Modal, SaveForm, ToastContext } from './ui'
+import { useAppUpdate } from './updates'
+import type { Account, AppData, Transaction } from './types'
 
-type Page = 'assets' | 'accounts' | 'bills' | 'settings'
-type ModalState = null | { kind: 'account'; account?: Account } | { kind: 'entry'; entry?: Transaction }
-const today = () => new Date().toISOString().slice(0, 10)
-const money = (value: number, currency = 'CNY') => {
-  try { return new Intl.NumberFormat('zh-CN', { style: 'currency', currency, maximumFractionDigits: ['BTC', 'ETH'].includes(currency) ? 6 : 2 }).format(value || 0) }
-  catch { return `${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 6 }).format(value || 0)} ${currency}` }
-}
-const displayDate = (date: string) => new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric' }).format(new Date(`${date}T12:00:00`))
-const accountName = (accounts: Account[], id?: string) => accounts.find(a => a.id === id)?.name ?? '已删除账户'
+type Page = 'overview' | 'accounts' | 'settings'
+type ModalState = null | { kind: 'detail'; id: string } | { kind: 'account'; id?: string } | { kind: 'inventory'; id?: string } | { kind: 'entry'; entry?: Transaction } | { kind: 'categories' } | { kind: 'import'; data: AppData }
 
-function Modal({ children, onClose, title }: { children: ReactNode; onClose: () => void; title: string }) {
-  return <div className="modal-backdrop" onMouseDown={onClose}><section className="modal" onMouseDown={e => e.stopPropagation()}>
-    <header className="modal-head"><h2>{title}</h2><button className="icon-button" onClick={onClose} aria-label="关闭">×</button></header>{children}
-  </section></div>
-}
-
-function AssetsPage({ data, openEntry }: { data: AppData; openEntry: () => void }) {
-  const assets = totalFor(data, 'asset'), liabilities = totalFor(data, 'liability'), net = assets - liabilities
-  const distribution = allocationByType(data), max = distribution.reduce((sum, item) => sum + item.value, 0)
-  let cursor = 0
-  const wheel = distribution.length ? `conic-gradient(${distribution.map((item, i) => { const start = cursor; cursor += max ? item.value / max * 360 : 0; return `${colors[i % colors.length]} ${start}deg ${cursor}deg` }).join(', ')})` : '#e9edea'
-  const missing = data.accounts.filter(a => !a.archived && rateFor(data, a.currency) === undefined)
-  const accounts = [...data.accounts].filter(a => !a.archived).sort((a, b) => a.sortOrder - b.sortOrder)
-  return <main className="page assets-page">
-    <header className="page-head"><div><p className="eyebrow">我的资产</p><h1>资产总览</h1></div><button className="record-button" onClick={openEntry}><span>＋</span> 记一笔</button></header>
-    <section className="net-card"><p>净资产 <span className="quiet">{data.settings.baseCurrency}</span></p><strong>{money(net, data.settings.baseCurrency)}</strong><div className="net-details"><span>资产 <b>{money(assets, data.settings.baseCurrency)}</b></span><i/><span>负债 <b>{money(liabilities, data.settings.baseCurrency)}</b></span></div></section>
-    {missing.length > 0 && <div className="notice">{missing.map(a => a.currency.toUpperCase()).filter((x, i, arr) => arr.indexOf(x) === i).join('、')} 尚未设置汇率，未计入总额</div>}
-    <section className="section-title"><div><h2>资产分布</h2><p>按账户类型</p></div><span className="muted">仅资产账户</span></section>
-    {distribution.length ? <section className="distribution-card"><div className="donut" style={{ background: wheel }}><div><b>{money(assets, data.settings.baseCurrency)}</b><span>可换算资产</span></div></div><div className="legend">{distribution.map((item, index) => <div key={item.type}><i style={{ background: colors[index % colors.length] }}/><span>{accountTypes[item.type as AccountType].label}</span><b>{max ? Math.round(item.value / max * 100) : 0}%</b></div>)}</div></section> : <div className="empty-card"><span>◇</span><b>从第一个账户开始</b><p>添加账户后，在这里查看资产分布。</p></div>}
-    <section className="section-title accounts-title"><div><h2>账户</h2><p>{accounts.length} 个账户</p></div></section>
-    <section className="account-list">{accounts.slice(0, 6).map(account => <AccountRow key={account.id} account={account} data={data}/>)}</section>
-  </main>
+function exportBackup(data: AppData) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
+  const link = document.createElement('a')
+  link.href = url; link.download = `jingzi-backup-${localDate()}.json`
+  document.body.append(link); link.click(); link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 10000)
 }
 
-function AccountRow({ account, data, controls, onEdit }: { account: Account; data: AppData; controls?: ReactNode; onEdit?: () => void }) {
-  const value = balanceOf(account, data.transactions), converted = rateFor(data, account.currency)
-  return <article className="account-row" onClick={onEdit}><span className="account-icon" style={{ color: account.color, background: `${account.color}18` }}>{account.icon || accountTypes[account.type].icon}</span><div className="account-copy"><b>{account.name}</b><small>{accountTypes[account.type].label} · {account.currency.toUpperCase()}</small></div><div className="account-balance"><b>{money(value, account.currency)}</b>{converted === undefined ? <small className="missing">待更新汇率</small> : account.currency.toUpperCase() !== data.settings.baseCurrency.toUpperCase() && <small>≈ {money(value * converted, data.settings.baseCurrency)}</small>}</div>{controls}</article>
-}
-
-function AccountsPage({ data, setData, openAccount }: { data: AppData; setData: (fn: (data: AppData) => AppData) => void; openAccount: (account?: Account) => void }) {
-  const [dragId, setDragId] = useState<string | null>(null)
-  const accounts = [...data.accounts].filter(a => !a.archived).sort((a, b) => a.sortOrder - b.sortOrder)
-  const reorder = (from: string, to: string) => {
-    if (from === to) return
-    setData(current => { const all = [...current.accounts]; const fromIndex = all.findIndex(a => a.id === from), toIndex = all.findIndex(a => a.id === to); const [item] = all.splice(fromIndex, 1); all.splice(toIndex, 0, item); return { ...current, accounts: all.map((a, index) => ({ ...a, sortOrder: index })) } })
-  }
-  const move = (id: string, delta: number) => { const index = accounts.findIndex(a => a.id === id), other = accounts[index + delta]; if (other) reorder(id, other.id) }
-  return <main className="page">
-    <header className="page-head"><div><p className="eyebrow">账户管理</p><h1>我的账户</h1></div><button className="round-add" onClick={() => openAccount()}>＋</button></header>
-    <p className="helper">长按拖动可调整顺序，点击账户可编辑。</p>
-    <section className="account-list sortable-list">{accounts.length ? accounts.map((account, index) => <div key={account.id} draggable onDragStart={() => setDragId(account.id)} onDragOver={e => e.preventDefault()} onDrop={() => { if (dragId) reorder(dragId, account.id); setDragId(null) }}><AccountRow account={account} data={data} onEdit={() => openAccount(account)} controls={<span className="sort-buttons" onClick={e => e.stopPropagation()}><button disabled={index === 0} onClick={() => move(account.id, -1)}>↑</button><button disabled={index === accounts.length - 1} onClick={() => move(account.id, 1)}>↓</button></span>}/></div>) : <div className="empty-card"><span>＋</span><b>还没有账户</b><p>银行卡、投资、海外账户和负债都可以添加。</p><button className="primary-button" onClick={() => openAccount()}>添加第一个账户</button></div>}</section>
-  </main>
-}
-
-function BillsPage({ data, openEntry, editEntry, removeEntry }: { data: AppData; openEntry: () => void; editEntry: (entry: Transaction) => void; removeEntry: (entry: Transaction) => void }) {
-  const [month, setMonth] = useState(today().slice(0, 7)); const [filter, setFilter] = useState(''); const [query, setQuery] = useState('')
-  const entries = [...data.transactions].filter(item => item.date.startsWith(month) && (!filter || item.accountId === filter || item.targetAccountId === filter) && (!query || item.note?.toLowerCase().includes(query.toLowerCase()) || (item.categoryId && data.categories.find(c => c.id === item.categoryId)?.name.includes(query)))).sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt))
-  return <main className="page">
-    <header className="page-head"><div><p className="eyebrow">账单</p><h1>资金流水</h1></div><button className="round-add" onClick={openEntry}>＋</button></header>
-    <div className="filters"><input type="month" value={month} onChange={e => setMonth(e.target.value)}/><select value={filter} onChange={e => setFilter(e.target.value)}><option value="">全部账户</option>{data.accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select><input className="search" placeholder="搜索备注或分类" value={query} onChange={e => setQuery(e.target.value)}/></div>
-    <section className="entry-list">{entries.length ? entries.map(entry => <EntryRow key={entry.id} entry={entry} data={data} onEdit={() => editEntry(entry)} onRemove={() => removeEntry(entry)}/>) : <div className="empty-card"><span>⌁</span><b>这个月还没有记录</b><p>每一笔收支都会自动更新账户余额。</p><button className="primary-button" onClick={openEntry}>记一笔</button></div>}</section>
-  </main>
-}
-
-function EntryRow({ entry, data, onEdit, onRemove }: { entry: Transaction; data: AppData; onEdit: () => void; onRemove: () => void }) {
-  const category = data.categories.find(c => c.id === entry.categoryId)
-  const info = entry.type === 'transfer' ? `${accountName(data.accounts, entry.accountId)} → ${accountName(data.accounts, entry.targetAccountId)}` : entry.type === 'adjustment' ? `余额调整 · ${accountName(data.accounts, entry.accountId)}` : `${category?.name ?? (entry.type === 'income' ? '收入' : '支出')} · ${accountName(data.accounts, entry.accountId)}`
-  const positive = entry.type === 'income' || entry.type === 'adjustment' && entry.amount >= 0
-  const currency = data.accounts.find(a => a.id === entry.accountId)?.currency ?? 'CNY'
-  return <article className="entry-row"><span className={`entry-icon ${entry.type}`}>{entry.type === 'transfer' ? '↔' : category?.icon ?? (entry.type === 'income' ? '↑' : entry.type === 'adjustment' ? '≈' : '↓')}</span><div onClick={onEdit}><b>{info}</b><small>{displayDate(entry.date)}{entry.note ? ` · ${entry.note}` : ''}</small></div><div className={`entry-amount ${positive ? 'positive' : ''}`} onClick={onEdit}><b>{entry.type === 'transfer' ? `${money(entry.amount, currency)} →` : `${positive ? '+' : '−'}${money(Math.abs(entry.amount), currency)}`}</b></div><button className="delete-entry" aria-label="删除流水" onClick={onRemove}>×</button></article>
-}
-
-function SettingsPage({ data, setData, updateRates, updatingRates, importData }: { data: AppData; setData: (fn: (data: AppData) => AppData) => void; updateRates: () => void; updatingRates: boolean; importData: (file: File) => void }) {
-  const fileRef = useRef<HTMLInputElement>(null); const [catName, setCatName] = useState(''); const [catDirection, setCatDirection] = useState<'income' | 'expense'>('expense')
-  const exportData = () => { const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `jingzi-backup-${today()}.json`; link.click(); URL.revokeObjectURL(link.href) }
-  const addCategory = () => { if (!catName.trim()) return; setData(current => ({ ...current, categories: [...current.categories, { id: uid(), name: catName.trim(), direction: catDirection, color: colors[current.categories.length % colors.length], icon: catDirection === 'income' ? '↑' : '•', sortOrder: current.categories.length, active: true }] })); setCatName('') }
-  return <main className="page settings-page">
-    <header className="page-head"><div><p className="eyebrow">设置</p><h1>本地与汇率</h1></div></header>
-    <section className="setting-section"><div className="setting-heading"><div><h2>主币种</h2><p>资产总览会自动换算为此币种</p></div></div><select className="base-currency" value={data.settings.baseCurrency} onChange={e => setData(current => ({ ...current, settings: { ...current.settings, baseCurrency: e.target.value } }))}>{supportedCurrencies.map(([code, label]) => <option key={code} value={code}>{code} · {label}</option>)}</select></section>
-    <section className="setting-section"><div className="setting-heading"><div><h2>自动汇率</h2><p>法币、USDT、USDC、BTC 与 ETH 统一自动获取</p></div><button className="outline-button" onClick={updateRates} disabled={updatingRates}>{updatingRates ? '↻ 获取中…' : '↻ 更新汇率'}</button></div><p className="tiny">{data.settings.lastRateUpdate ? `上次更新：${new Date(data.settings.lastRateUpdate).toLocaleString('zh-CN')}${data.settings.lastRateSource ? ` · 来源 ${data.settings.lastRateSource}` : ''}` : '尚未获取汇率。联网后点击更新即可。'} 更新时会自动在多个数据源间择优，单一数据源不可达不影响其他币种。</p><div className="rate-list">{supportedCurrencies.map(([code, label]) => { const rate = rateFor(data, code); return <div key={code} className="rate-row readonly-rate"><div><b>{code}</b><small>{label}</small></div><span>{rate === undefined ? '等待更新' : code === data.settings.baseCurrency ? `1 ${code}` : `≈ ${rate.toLocaleString('zh-CN', { maximumFractionDigits: 6 })} ${data.settings.baseCurrency}`}</span><small>{data.rates[code] || code === 'USD' ? '自动' : '—'}</small></div>})}</div></section>
-    <section className="setting-section"><div className="setting-heading"><div><h2>数据备份</h2><p>全部数据仅保存在此设备</p></div></div><div className="backup-actions"><button className="primary-button" onClick={exportData}>导出 JSON 备份</button><button className="outline-button" onClick={() => fileRef.current?.click()}>导入并恢复</button><input ref={fileRef} type="file" accept="application/json" hidden onChange={e => { const file = e.target.files?.[0]; if (file) importData(file); e.currentTarget.value = '' }}/></div></section>
-    <section className="setting-section"><div className="setting-heading"><div><h2>分类管理</h2><p>停用后不会出现在新增流水中</p></div></div><div className="category-list">{[...data.categories].sort((a, b) => a.sortOrder - b.sortOrder).map(category => <button key={category.id} className={!category.active ? 'disabled-category' : ''} onClick={() => setData(current => ({ ...current, categories: current.categories.map(c => c.id === category.id ? { ...c, active: !c.active } : c) }))}><i style={{ background: category.color }}>{category.icon}</i>{category.name}<small>{category.direction === 'income' ? '收入' : '支出'} · {category.active ? '已启用' : '已停用'}</small></button>)}</div><div className="inline-form"><input placeholder="新增分类" value={catName} onChange={e => setCatName(e.target.value)}/><select value={catDirection} onChange={e => setCatDirection(e.target.value as 'income' | 'expense')}><option value="expense">支出</option><option value="income">收入</option></select><button onClick={addCategory}>添加</button></div></section>
-    <p className="privacy-note">没有登录、没有云同步、没有广告追踪。清除 Safari 网站数据前，请先导出备份。</p>
-    <p className="tiny version-stamp">构建版本 {__BUILD_STAMP__} · 若此处版本号未变化，说明该设备仍在使用缓存的旧版</p>
-  </main>
-}
-
-function AccountForm({ data, account, onSave, onDelete, onClose }: { data: AppData; account?: Account; onSave: (account: Account) => void; onDelete: (account: Account) => void; onClose: () => void }) {
-  const [form, setForm] = useState({ name: account?.name ?? '', kind: account?.kind ?? 'asset' as AccountKind, type: account?.type ?? 'bank' as AccountType, currency: account?.currency ?? 'CNY', openingBalance: String(account?.openingBalance ?? ''), color: account?.color ?? colors[data.accounts.length % colors.length], icon: account?.icon ?? '', note: account?.note ?? '' })
-  const save = (e: FormEvent) => { e.preventDefault(); const balance = Number(form.openingBalance || 0); if (!form.name.trim() || !Number.isFinite(balance)) return; onSave({ id: account?.id ?? uid(), name: form.name.trim(), kind: form.kind, type: form.type, currency: form.currency.trim().toUpperCase(), openingBalance: balance, color: form.color, icon: form.icon || accountTypes[form.type].icon, note: form.note, sortOrder: account?.sortOrder ?? data.accounts.length, createdAt: account?.createdAt ?? new Date().toISOString() }) }
-  return <Modal title={account ? '编辑账户' : '新增账户'} onClose={onClose}><form className="form-stack" onSubmit={save}><label>账户名称<input autoFocus value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="如：招商银行储蓄卡"/></label><div className="two-fields"><label>属性<select value={form.kind} onChange={e => setForm({ ...form, kind: e.target.value as AccountKind, type: e.target.value === 'liability' && form.type === 'bank' ? 'credit-card' : form.type })}><option value="asset">资产</option><option value="liability">负债</option></select></label><label>账户类型<select value={form.type} onChange={e => setForm({ ...form, type: e.target.value as AccountType })}>{Object.entries(accountTypes).filter(([key]) => form.kind === 'asset' ? !['credit-card', 'loan'].includes(key) : ['credit-card', 'loan', 'other'].includes(key)).map(([key, type]) => <option key={key} value={key}>{type.label}</option>)}</select></label></div><div className="two-fields"><label>币种<select value={form.currency} onChange={e => setForm({ ...form, currency: e.target.value })}>{supportedCurrencies.map(([code, label]) => <option key={code} value={code}>{code} · {label}</option>)}</select></label><label>期初余额<input inputMode="decimal" value={form.openingBalance} onChange={e => setForm({ ...form, openingBalance: e.target.value })} placeholder="0.00"/></label></div><label>备注（可选）<input value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} placeholder="例如：日常使用"/></label><div className="color-picker"><span>标记色</span>{colors.map(color => <button type="button" key={color} className={form.color === color ? 'selected' : ''} style={{ background: color }} onClick={() => setForm({ ...form, color })}/>)}</div><button className="primary-button form-submit" type="submit">保存账户</button>{account && <button className="danger-button" type="button" onClick={() => onDelete(account)}>删除账户</button>}</form></Modal>
-}
-
-function EntryForm({ data, entry, onSave, onClose }: { data: AppData; entry?: Transaction; onSave: (entry: Transaction) => void; onClose: () => void }) {
-  const [type, setType] = useState<EntryType>(entry?.type ?? 'expense'); const [accountId, setAccountId] = useState(entry?.accountId ?? data.accounts.find(a => !a.archived)?.id ?? ''); const [targetAccountId, setTargetAccountId] = useState(entry?.targetAccountId ?? ''); const [amount, setAmount] = useState(String(entry?.amount ?? '')); const [targetAmount, setTargetAmount] = useState(String(entry?.targetAmount ?? entry?.amount ?? '')); const [categoryId, setCategoryId] = useState(entry?.categoryId ?? ''); const [date, setDate] = useState(entry?.date ?? today()); const [note, setNote] = useState(entry?.note ?? ''); const [error, setError] = useState('')
-  const categories = data.categories.filter(c => c.active && c.direction === (type === 'income' ? 'income' : 'expense'))
-  const save = (e: FormEvent) => { e.preventDefault(); const numeric = Number(amount), targetNumeric = Number(targetAmount); if (!accountId || !Number.isFinite(numeric) || numeric === 0) return setError('请选择账户并填写有效金额。'); if (type === 'transfer' && (!targetAccountId || targetAccountId === accountId || !Number.isFinite(targetNumeric) || targetNumeric <= 0)) return setError('请选择不同的转入账户并填写到账金额。'); if ((type === 'income' || type === 'expense') && !categoryId) return setError('请选择分类。'); onSave({ id: entry?.id ?? uid(), type, accountId, targetAccountId: type === 'transfer' ? targetAccountId : undefined, amount: type === 'adjustment' ? numeric : Math.abs(numeric), targetAmount: type === 'transfer' ? Math.abs(targetNumeric) : undefined, categoryId: type === 'income' || type === 'expense' ? categoryId : undefined, date, note: note.trim(), createdAt: entry?.createdAt ?? new Date().toISOString() }) }
-  return <Modal title={entry ? '编辑流水' : '记一笔'} onClose={onClose}><form className="form-stack" onSubmit={save}><div className="segmented">{([['expense', '支出'], ['income', '收入'], ['transfer', '转账'], ['adjustment', '校准']] as [EntryType, string][]).map(([value, label]) => <button type="button" className={type === value ? 'active' : ''} key={value} onClick={() => { setType(value); setError(''); }}>{label}</button>)}</div><label>{type === 'transfer' ? '转出账户' : '账户'}<select value={accountId} onChange={e => setAccountId(e.target.value)}><option value="">选择账户</option>{data.accounts.filter(a => !a.archived).map(a => <option key={a.id} value={a.id}>{a.name} · {a.currency}</option>)}</select></label>{type === 'transfer' && <label>转入账户<select value={targetAccountId} onChange={e => setTargetAccountId(e.target.value)}><option value="">选择账户</option>{data.accounts.filter(a => !a.archived && a.id !== accountId).map(a => <option key={a.id} value={a.id}>{a.name} · {a.currency}</option>)}</select></label>}<div className={type === 'transfer' ? 'two-fields' : ''}><label>{type === 'adjustment' ? '调整额（可填负数）' : type === 'transfer' ? '转出金额' : '金额'}<input autoFocus inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.00"/></label>{type === 'transfer' && <label>到账金额<input inputMode="decimal" value={targetAmount} onChange={e => setTargetAmount(e.target.value)} placeholder="0.00"/></label>}</div>{(type === 'income' || type === 'expense') && <label>分类<select value={categoryId} onChange={e => setCategoryId(e.target.value)}><option value="">选择分类</option>{categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>}<label>日期<input type="date" value={date} onChange={e => setDate(e.target.value)}/></label><label>备注（可选）<input value={note} onChange={e => setNote(e.target.value)} placeholder="写下这笔记录的说明"/></label>{error && <p className="form-error">{error}</p>}<button className="primary-button form-submit" type="submit">保存记录</button></form></Modal>
+function ImportDialog({ incoming, hasCurrent, onExport, onConfirm, onClose }: { incoming: AppData; hasCurrent: boolean; onExport: () => void; onConfirm: () => Promise<unknown>; onClose: () => void }) {
+  const [busy, setBusy] = useState(false), [confirmed, setConfirmed] = useState(false)
+  return <Modal title="恢复备份" onClose={onClose} busy={busy}><SaveForm label="替换本机数据并恢复" busy={busy} setBusy={setBusy} onSave={async () => { if (!confirmed) throw new Error('请先确认已保存需要保留的本机数据。'); await onConfirm() }}><div className="import-summary"><Icon name="upload" size={28}/><h3>已检查备份内容</h3><dl><div><dt>账户</dt><dd>{incoming.accounts.length} 个</dd></div><div><dt>流水</dt><dd>{incoming.transactions.length} 笔</dd></div><div><dt>历史估值</dt><dd>{incoming.snapshots.length} 份</dd></div><div><dt>主币种</dt><dd>{incoming.settings.baseCurrency}</dd></div></dl></div><p className="warning-text">恢复将替换这台设备上的全部数据。备份中的历史记录会一起恢复。</p>{hasCurrent && <button type="button" className="secondary-button full-width" onClick={onExport}><Icon name="download" size={18}/>先导出当前数据</button>}<label className="checkbox-label"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)}/><span>我已保存需要保留的数据，确认替换。</span></label></SaveForm></Modal>
 }
 
 export default function App() {
-  const [data, setLoadedData] = useState<AppData | null>(null); const [page, setPage] = useState<Page>('assets'); const [modal, setModal] = useState<ModalState>(null); const [toast, setToast] = useState(''); const [updatingRates, setUpdatingRates] = useState(false)
-  useEffect(() => { loadData().then(setLoadedData) }, [])
-  const setData = (fn: (current: AppData) => AppData) => { if (!data) return; const next = fn(data); setLoadedData(next); void saveData(next) }
-  const message = (text: string) => { setToast(text); window.setTimeout(() => setToast(''), 2800) }
+  const [data, setData] = useState<AppData | null>(null), [loadError, setLoadError] = useState(''), [loading, setLoading] = useState(true)
+  const [page, setPage] = useState<Page>('overview'), [billsAccount, setBillsAccount] = useState<string | null>(null)
+  const [modal, setModal] = useState<ModalState>(null), [toast, setToast] = useState(''), [updatingRates, setUpdatingRates] = useState(false), [writing, setWriting] = useState(0)
+  const queue = useRef<ReturnType<typeof createWriteQueue> | null>(null), timer = useRef<number | undefined>(undefined), fileRef = useRef<HTMLInputElement>(null), updating = useRef(false)
+  const updates = useAppUpdate(), [updateDismissed, setUpdateDismissed] = useState(false)
+  const message = useCallback((text: string) => { setToast(text); window.clearTimeout(timer.current); timer.current = window.setTimeout(() => setToast(''), 5000) }, [])
+  const initialize = useCallback(async () => {
+    setLoading(true); setLoadError('')
+    try {
+      const loaded = await loadData()
+      queue.current = createWriteQueue(loaded, saveData, setData)
+      setData(loaded)
+    } catch (error) { setLoadError(error instanceof Error ? error.message : '无法读取本地账本。'); setData(null) }
+    finally { setLoading(false) }
+  }, [])
+  useEffect(() => { void initialize(); return () => window.clearTimeout(timer.current) }, [initialize])
+
+  const commit = async (update: (current: AppData) => AppData) => {
+    if (!queue.current) throw new Error('账本尚未准备好。')
+    setWriting(count => count + 1)
+    try { return await queue.current.commit(update) }
+    catch (error) { throw new Error(error instanceof Error && /账户|金额|分类|归档/.test(error.message) ? error.message : '未能保存到本机，请检查可用空间后重试。你的输入仍然保留。') }
+    finally { setWriting(count => count - 1) }
+  }
+  const report = async (action: () => Promise<unknown>) => { try { await action() } catch (error) { message(error instanceof Error ? error.message : '操作失败，请重试。') } }
+  const readImport = async (file: File) => { try { const incoming = parseBackup(await file.text()); setModal({ kind: 'import', data: incoming }) } catch (error) { message(error instanceof Error ? error.message : '无法读取备份文件。') } }
+  const exportCurrent = () => { const current = queue.current?.current(); if (current) { exportBackup(current); message('已生成备份，请将文件保存到安全位置。') } }
+  const restore = async (incoming: AppData) => {
+    if (queue.current) await commit(() => incoming)
+    else { await saveData(incoming); queue.current = createWriteQueue(incoming, saveData, setData); setData(incoming); setLoadError('') }
+    setModal(null); setBillsAccount(null); setPage('overview'); message('备份已恢复')
+  }
   const updateRates = async () => {
-    if (!data || updatingRates) return
-    setUpdatingRates(true)
-    message('正在获取法币与加密货币汇率…')
+    if (updating.current) return
+    updating.current = true; setUpdatingRates(true)
     try {
       const live = await fetchLiveRates()
-      setData(current => makeRates(current, live))
-      const parts = [live.fiat.CNY ? '法币' : '', Object.keys(live.crypto).length ? '加密货币' : ''].filter(Boolean)
-      message(parts.length === 2 ? '法币与加密货币汇率已更新' : `已更新${parts[0] ?? '汇率'}（另一数据源暂时不可达，已保留原值）`)
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error)
-      console.error('汇率更新失败', detail)
-      message('未能更新汇率：所有数据源均不可达，请换用其他网络后重试')
-    } finally {
-      setUpdatingRates(false)
-    }
+      await commit(current => captureSnapshot(makeRates(current, live), 'rates'))
+      message(live.fiat.CNY && Object.keys(live.crypto).length ? '参考汇率已更新' : '部分汇率已更新；未获取的币种保留旧值和更新时间。')
+    } catch (error) { message(error instanceof Error && error.message.includes('保存') ? error.message : '暂时无法获取汇率，请检查网络后重试。原汇率已保留。') }
+    finally { updating.current = false; setUpdatingRates(false) }
   }
-  const importData = (file: File) => { const reader = new FileReader(); reader.onload = () => { try { const incoming = JSON.parse(String(reader.result)) as AppData; if (incoming.version !== 1 || !Array.isArray(incoming.accounts) || !Array.isArray(incoming.transactions) || !incoming.rates) throw new Error(); if (window.confirm('导入会替换当前手机上的全部数据，是否继续？')) { setLoadedData(incoming); void saveData(incoming); message('备份已恢复') } } catch { message('这不是有效的净值备份文件') } }; reader.readAsText(file) }
-  if (!data) return <div className="loading"><span>◒</span><b>正在打开你的本地账本</b></div>
-  const saveAccount = (account: Account) => { setData(current => ({ ...current, accounts: current.accounts.some(a => a.id === account.id) ? current.accounts.map(a => a.id === account.id ? account : a) : [...current.accounts, account] })); setModal(null); message('账户已保存') }
-  const saveEntry = (entry: Transaction) => { setData(current => ({ ...current, transactions: current.transactions.some(t => t.id === entry.id) ? current.transactions.map(t => t.id === entry.id ? entry : t) : [...current.transactions, entry] })); setModal(null); message('流水已保存') }
-  const removeEntry = (entry: Transaction) => { if (window.confirm('删除这笔记录？账户余额会立即重新计算。')) { setData(current => ({ ...current, transactions: current.transactions.filter(t => t.id !== entry.id) })); message('记录已删除') } }
-  const deleteAccount = (account: Account) => { if (window.confirm(`删除“${account.name}”及其全部关联流水？此操作无法撤销。`)) { setData(current => removeAccount(current, account.id)); setModal(null); message('账户及关联流水已删除') } }
-  return <div className="app-shell"><div className="app-content">{page === 'assets' && <AssetsPage data={data} openEntry={() => setModal({ kind: 'entry' })}/>} {page === 'accounts' && <AccountsPage data={data} setData={setData} openAccount={account => setModal({ kind: 'account', account })}/>} {page === 'bills' && <BillsPage data={data} openEntry={() => setModal({ kind: 'entry' })} editEntry={entry => setModal({ kind: 'entry', entry })} removeEntry={removeEntry}/>} {page === 'settings' && <SettingsPage data={data} setData={setData} updateRates={updateRates} updatingRates={updatingRates} importData={importData}/>}</div><nav className="tabbar">{([['assets', '◌', '资产'], ['accounts', '▤', '账户'], ['bills', '≡', '账单'], ['settings', '⚙', '设置']] as [Page, string, string][]).map(([key, icon, label]) => <button key={key} className={page === key ? 'active' : ''} onClick={() => setPage(key)}><span>{icon}</span>{label}</button>)}</nav>{modal?.kind === 'account' && <AccountForm data={data} account={modal.account} onSave={saveAccount} onDelete={deleteAccount} onClose={() => setModal(null)}/>} {modal?.kind === 'entry' && <EntryForm data={data} entry={modal.entry} onSave={saveEntry} onClose={() => setModal(null)}/>} {toast && <div className="toast">{toast}</div>}</div>
+  const saveAccount = async (account: Account) => {
+    await commit(current => {
+      const existing = current.accounts.find(item => item.id === account.id)
+      const next = { ...current, accounts: existing ? current.accounts.map(item => item.id === account.id ? { ...item, name: account.name, type: account.type, color: account.color, note: account.note } : item) : [...current.accounts, { ...account, sortOrder: current.accounts.length }] }
+      return existing ? next : captureSnapshot(next, 'account')
+    })
+    setModal(null); message('账户已保存')
+  }
+  const saveEntry = async (entry: Transaction) => {
+    await commit(current => {
+      if (!current.accounts.some(account => account.id === entry.accountId && !account.archived) || entry.type === 'transfer' && !current.accounts.some(account => account.id === entry.targetAccountId && !account.archived)) throw new Error('账户已归档，请恢复后再记账。')
+      return captureSnapshot({ ...current, transactions: current.transactions.some(item => item.id === entry.id) ? current.transactions.map(item => item.id === entry.id ? entry : item) : [...current.transactions, entry] }, 'transaction')
+    })
+    setModal(null); message('流水已保存')
+  }
+  const archiveAccount = (account: Account) => {
+    if (!account.archived && !window.confirm(`归档“${account.name}”？\n余额将退出当前资产汇总，历史和关联流水保留，之后可以恢复。`)) return
+    void report(async () => { await commit(current => setArchived(current, account.id, !account.archived)); setModal(null); message(account.archived ? '账户已恢复' : '账户已归档') })
+  }
+  const deleteAccount = (account: Account) => {
+    if (!window.confirm(`删除“${account.name}”？此操作无法撤销。`)) return
+    void report(async () => { await commit(current => deleteEmptyAccount(current, account.id)); setModal(null); message('账户已删除') })
+  }
+  const moveAccount = (id: string, direction: number) => void report(async () => { await commit(current => {
+    const active = current.accounts.filter(account => !account.archived).sort((a, b) => a.sortOrder - b.sortOrder)
+    const index = active.findIndex(account => account.id === id), other = active[index + direction]
+    if (!other) return current
+    ;[active[index], active[index + direction]] = [active[index + direction], active[index]]
+    const order = new Map([...active, ...current.accounts.filter(account => account.archived)].map((account, index) => [account.id, index]))
+    return { ...current, accounts: current.accounts.map(account => ({ ...account, sortOrder: order.get(account.id)! })) }
+  }) })
+
+  const closeModal = () => setModal(null)
+  const currentAccount = modal && 'id' in modal ? data?.accounts.find(account => account.id === modal.id) : undefined
+  const importDialog = modal?.kind === 'import' && <ImportDialog incoming={modal.data} hasCurrent={!!data} onClose={closeModal} onConfirm={() => restore(modal.data)} onExport={exportCurrent}/>
+  if (loading) return <div className="loading-screen"><span className="app-monogram">净</span><p>正在打开本地账本…</p></div>
+  if (loadError || !data) return <ToastContext.Provider value={toast}><div className="recovery-screen"><Icon name="info" size={36}/><h1>暂时无法打开账本</h1><p>{loadError}</p><p className="footnote">原有数据没有被空账本覆盖。可以重试读取，或从你保存的备份恢复。</p><button className="primary-button" onClick={() => void initialize()}>重试读取</button><button className="secondary-button" onClick={() => fileRef.current?.click()}>选择备份恢复</button><input type="file" ref={fileRef} accept="application/json,.json" hidden onChange={event => { const file = event.target.files?.[0]; if (file) void readImport(file); event.target.value = '' }}/>{importDialog}{toast && <div className="toast" role="status">{toast}</div>}</div></ToastContext.Provider>
+  return <ToastContext.Provider value={toast}><div className="app-shell"><div className="app-content">
+    {updates.ready && !updateDismissed && <div className="update-banner"><span>新版本已准备好</span><button disabled={!!modal || writing > 0} onClick={updates.apply}>立即更新</button><button onClick={() => setUpdateDismissed(true)}>稍后</button></div>}
+    {billsAccount !== null ? <Bills key={billsAccount} data={data} initialAccountId={billsAccount} onBack={() => setBillsAccount(null)} onAdd={() => setModal({ kind: 'entry' })} onEdit={entry => setModal({ kind: 'entry', entry })}/> : page === 'overview' ? <Overview data={data} onAdd={() => setModal({ kind: 'account' })} onInventory={() => setModal({ kind: 'inventory' })} onTogglePrivacy={() => void report(async () => { await commit(current => ({ ...current, settings: { ...current.settings, hideAmounts: !current.settings.hideAmounts } })) })} onRates={() => setPage('settings')}/> : page === 'accounts' ? <Accounts data={data} onSelect={account => setModal({ kind: 'detail', id: account.id })} onAdd={() => setModal({ kind: 'account' })} onInventory={() => setModal({ kind: 'inventory' })} onBills={() => setBillsAccount('')} onMove={moveAccount} onArchive={archiveAccount} onDelete={deleteAccount}/> : <Settings data={data} commit={commit} onRates={() => void updateRates()} updatingRates={updatingRates} onExport={exportCurrent} onImport={file => void readImport(file)} onCategories={() => setModal({ kind: 'categories' })} onCheckUpdate={() => { setUpdateDismissed(false); void updates.check() }} checkingUpdate={updates.checking} updateStatus={updates.status}/>}</div>
+    <nav className="tabbar" aria-label="主导航">{([['overview', 'overview', '总览'], ['accounts', 'wallet', '账户'], ['settings', 'settings', '设置']] as const).map(([key, icon, label]) => <button key={key} aria-current={page === key && billsAccount === null ? 'page' : undefined} onClick={() => { setPage(key); setBillsAccount(null); window.scrollTo(0, 0) }}><Icon name={icon}/><span>{label}</span></button>)}</nav>
+    {modal?.kind === 'detail' && currentAccount && <AccountDetail account={currentAccount} data={data} onClose={closeModal} onEdit={() => setModal({ kind: 'account', id: currentAccount.id })} onInventory={() => setModal({ kind: 'inventory', id: currentAccount.id })} onBills={() => { setModal(null); setPage('accounts'); setBillsAccount(currentAccount.id) }} onArchive={() => archiveAccount(currentAccount)} onDelete={() => { if (!hasAccountHistory(data, currentAccount.id)) deleteAccount(currentAccount) }}/>}
+    {modal?.kind === 'account' && <AccountForm key={modal.id ?? 'new'} data={data} account={currentAccount} onSave={saveAccount} onClose={closeModal}/>}
+    {modal?.kind === 'inventory' && <InventoryForm data={data} accountId={modal.id} onClose={closeModal} onSave={async inputs => { await commit(current => inventoryBalances(current, inputs)); setModal(null); message('余额盘点已保存') }}/>}
+    {modal?.kind === 'entry' && <EntryForm data={data} entry={modal.entry} defaultAccountId={billsAccount || undefined} onClose={closeModal} onSave={saveEntry} onDelete={() => report(async () => { const id = modal.entry?.id; await commit(current => captureSnapshot({ ...current, transactions: current.transactions.filter(entry => entry.id !== id) }, 'transaction')); setModal(null); message('流水已删除') })}/>}
+    {modal?.kind === 'categories' && <Categories data={data} commit={commit} onClose={closeModal}/>}{importDialog}
+    {toast && <div className="toast" role="status">{toast}</div>}
+  </div></ToastContext.Provider>
 }

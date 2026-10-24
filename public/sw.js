@@ -1,14 +1,18 @@
-// 版本号变更会触发新 SW 安装、清理旧缓存并接管页面
-const CACHE = 'jingzi-v4'
+// 版本号变更会准备新资源，用户接受更新后再激活、清理本应用旧缓存。
+const CACHE = 'jingzi-v6'
 const CORE = ['./', './index.html', './assets/app.js', './assets/app.css', './manifest.webmanifest', './icon.svg']
 
 self.addEventListener('install', event => event.waitUntil(
-  caches.open(CACHE).then(cache => cache.addAll(CORE)).then(() => self.skipWaiting())
+  caches.open(CACHE).then(cache => cache.addAll(CORE))
 ))
+
+self.addEventListener('message', event => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting()
+})
 
 self.addEventListener('activate', event => event.waitUntil(
   caches.keys()
-    .then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key))))
+    .then(keys => Promise.all(keys.filter(key => key.startsWith('jingzi-') && key !== CACHE).map(key => caches.delete(key))))
     .then(() => self.clients.claim())
 ))
 
@@ -28,6 +32,7 @@ self.addEventListener('fetch', event => {
     event.respondWith(
       fetch(request)
         .then(response => {
+          if (!response.ok) throw new Error('Navigation unavailable')
           const copy = response.clone()
           caches.open(CACHE).then(cache => cache.put(request, copy))
           return response

@@ -1,4 +1,4 @@
-import type { Account, AppData, Transaction } from './types.ts'
+import type { Account, AppData, LedgerData, Transaction } from './types.ts'
 
 export function balanceOf(account: Account, transactions: Transaction[]) {
   return transactions.reduce((balance, entry) => {
@@ -13,19 +13,19 @@ export function balanceOf(account: Account, transactions: Transaction[]) {
   }, account.openingBalance)
 }
 
-export function rateFor(data: AppData, currency: string) {
+export function rateFor(data: Pick<AppData, 'rates' | 'settings'>, currency: string) {
   const source = currency.toUpperCase(), base = data.settings.baseCurrency.toUpperCase()
   if (source === base) return 1
   const sourceUsd = source === 'USD' ? 1 : data.rates[source]?.usdValue
   const baseUsd = base === 'USD' ? 1 : data.rates[base]?.usdValue
   return sourceUsd && baseUsd ? sourceUsd / baseUsd : undefined
 }
-export function totalFor(data: AppData, kind: Account['kind']) {
+export function totalFor(data: LedgerData, kind: Account['kind']) {
   return data.accounts.filter(a => !a.archived && a.kind === kind).reduce((sum, account) => {
     const rate = rateFor(data, account.currency); return rate === undefined ? sum : sum + balanceOf(account, data.transactions) * rate
   }, 0)
 }
-export function allocationByType(data: AppData) {
+export function allocationByType(data: LedgerData) {
   const group = new Map<string, number>()
   data.accounts.filter(a => !a.archived && a.kind === 'asset').forEach(account => {
     const rate = rateFor(data, account.currency); if (rate === undefined) return
